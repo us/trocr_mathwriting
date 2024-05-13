@@ -1,7 +1,7 @@
-# trocr_mathwriting
+# TROCR on MathWriting
 
 ## Overview
-**trocr_mathwriting** is an innovative project that utilizes the TrOCR model by Microsoft to convert images of mathematical handwriting into machine-readable text. This project specifically focuses on adapting TrOCR to work effectively with the MathWriting dataset, a new and comprehensive dataset comprised of handwritten mathematical expressions.
+**TROCR on MathWriting** is an innovative project that utilizes the TrOCR model by Microsoft to convert images of mathematical handwriting into machine-readable latex text. This project specifically focuses on adapting TrOCR to work effectively with the MathWriting dataset, a new and comprehensive dataset comprised of handwritten mathematical expressions.
 
 ### About the MathWriting Dataset
 MathWriting is the largest online handwritten mathematical expression (HME) dataset currently available. It includes over 230,000 human-written samples along with an additional 400,000 synthetic samples, making it ideal for both online and offline HME recognition tasks. This dataset surpasses the size of all existing offline HME datasets like IM2LATEX-100K.
