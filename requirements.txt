@@ -2,3 +2,8 @@ tqdm
 pycairo
 datasets
 scikit-learn
+transformers
+datasets
+jiwer
+torch
+pillow
