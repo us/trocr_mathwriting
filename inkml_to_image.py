@@ -1,158 +1,116 @@
 import dataclasses
 import os
-from xml.etree import ElementTree
+from xml.etree.ElementTree import parse
 import cairo
 import math
-import PIL
 import PIL.Image
 import numpy as np
 import argparse
-import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
-import argparse
-import os
-import pandas as pd
-from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
+
+
 
 @dataclasses.dataclass
 class Ink:
-  """Represents a single ink, as read from an InkML file."""
-  # Every stroke in the ink.
-  # Each stroke array has shape (3, number of points), where the first
-  # dimensions are (x, y, timestamp), in that order.
-  strokes: list[np.ndarray]
-  # Metadata present in the InkML.
-  annotations: dict[str, str]
+    strokes: list[np.ndarray]
+    annotations: dict[str, str]
 
-def read_inkml_file(filename: str) -> Ink:
-  """Simple reader for MathWriting's InkML files."""
-  with open(filename, "r") as f:
-    root = ElementTree.fromstring(f.read())
+def read_inkml_file(file_path: str) -> Ink:
+    """ Reads InkML file from path directly to save memory and processing time. """
+    tree = parse(file_path)
+    root = tree.getroot()
 
-  strokes = []
-  annotations = {}
-
-  for element in root:
-    tag_name = element.tag.removeprefix('{http://www.w3.org/2003/InkML}')
-    if tag_name == 'annotation':
-      annotations[element.attrib.get('type')] = element.text
-
-    elif tag_name == 'trace':
-      points = element.text.split(',')
-      stroke_x, stroke_y, stroke_t = [], [], []
-      for point in points:
-        x, y, t = point.split(' ')
-        stroke_x.append(float(x))
-        stroke_y.append(float(y))
-        stroke_t.append(float(t))
-      strokes.append(np.array((stroke_x, stroke_y, stroke_t)))
-
-  return Ink(strokes=strokes, annotations=annotations)
-
-
+    strokes = []
+    annotations = {}
+    for element in root:
+        tag_name = element.tag.removeprefix('{http://www.w3.org/2003/InkML}')
+        if tag_name == 'annotation':
+            annotations[element.attrib.get('type')] = element.text
+        elif tag_name == 'trace':
+            points = element.text.split(',')
+            stroke_x, stroke_y, stroke_t = zip(*(map(float, point.split()) for point in points))
+            strokes.append(np.array([stroke_x, stroke_y, stroke_t]))
+    return Ink(strokes=strokes, annotations=annotations)
 
 def cairo_to_pil(surface: cairo.ImageSurface) -> PIL.Image.Image:
-  """Converts a ARGB Cairo surface into an RGB PIL image."""
-  size = (surface.get_width(), surface.get_height())
-  stride = surface.get_stride()
-  with surface.get_data() as memory:
-    return PIL.Image.frombuffer(
-        'RGB', size, memory.tobytes(), 'raw', 'BGRX', stride
-    )
+    """ Converts a Cairo surface into a PIL image. """
+    size = (surface.get_width(), surface.get_height())
+    stride = surface.get_stride()
+    with surface.get_data() as memory:
+        return PIL.Image.frombuffer('RGB', size, memory.tobytes(), 'raw', 'BGRX', stride)
 
+def render_ink(ink: Ink, margin: int = 10, stroke_width: float = 1.5, stroke_color: tuple[float, float, float] = (0, 0, 0), background_color: tuple[float, float, float] = (1, 1, 1), resize_dims: tuple[int, int] = None) -> PIL.Image.Image:
+    """ Renders an ink as a PIL image using Cairo. """
+    xmin, ymin = np.min([np.min(stroke[:2], axis=1) for stroke in ink.strokes], axis=0)
+    xmax, ymax = np.max([np.max(stroke[:2], axis=1) for stroke in ink.strokes], axis=0)
+    width, height = int(xmax - xmin + 2 * margin), int(ymax - ymin + 2 * margin)
 
-def render_ink(
-    ink: Ink,
-    *,
-    margin: int = 10,
-    stroke_width: float = 1.5,
-    stroke_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
-    resize_dims: tuple[int, int] = None
-) -> PIL.Image.Image:
-  """Renders an ink as a PIL image using Cairo.
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    ctx = cairo.Context(surface)
+    ctx.set_source_rgb(*background_color)
+    ctx.paint()
+    ctx.set_source_rgb(*stroke_color)
+    ctx.set_line_width(stroke_width)
+    ctx.set_line_cap(cairo.LineCap.ROUND)
+    ctx.set_line_join(cairo.LineJoin.ROUND)
 
-  The image size is chosen to fit the entire ink while having one pixel per
-  InkML unit.
+    shift_x, shift_y = -xmin + margin, -ymin + margin
+    for stroke in ink.strokes:
+        points = np.array(stroke)
+        if len(points[0]) == 1:
+            x, y = points[0][0] + shift_x, points[1][0] + shift_y
+            ctx.arc(x, y, stroke_width / 2, 0, 2 * math.pi)
+            ctx.fill()
+        else:
+            x, y = points[0] + shift_x, points[1] + shift_y
+            ctx.move_to(x[0], y[0])
+            for xi, yi in zip(x[1:], y[1:]):
+                ctx.line_to(xi, yi)
+            ctx.stroke()
 
-  Args:
-    margin: size of the blank margin around the image (pixels)
-    stroke_width: width of each stroke (pixels)
-    stroke_color: color to paint the strokes with
-    background_color: color to fill the background with
-
-  Returns:
-    Rendered ink, as a PIL image.
-  """
-
-  # Compute transformation to fit the ink in the image.
-  xmin, ymin = np.vstack([stroke[:2].min(axis=1) for stroke in ink.strokes]).min(axis=0)
-  xmax, ymax = np.vstack([stroke[:2].max(axis=1) for stroke in ink.strokes]).max(axis=0)
-  width = int(xmax - xmin + 2*margin)
-  height = int(ymax - ymin + 2*margin)
-
-  shift_x = - xmin + margin
-  shift_y = - ymin + margin
-
-  def apply_transform(ink_x: float, ink_y: float):
-    return ink_x + shift_x, ink_y + shift_y
-
-  # Create the canvas with the background color
-  surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-  ctx = cairo.Context(surface)
-  ctx.set_source_rgb(*background_color)
-  ctx.paint()
-
-  # Set pen parameters
-  ctx.set_source_rgb(*stroke_color)
-  ctx.set_line_width(stroke_width)
-  ctx.set_line_cap(cairo.LineCap.ROUND)
-  ctx.set_line_join(cairo.LineJoin.ROUND)
-
-  for stroke in ink.strokes:
-    if len(stroke[0]) == 1:
-      # For isolated points we just draw a filled disk with a diameter equal
-      # to the line width.
-      x, y = apply_transform(stroke[0, 0], stroke[1, 0])
-      ctx.arc(x, y, stroke_width / 2, 0, 2 * math.pi)
-      ctx.fill()
-
-    else:
-      ctx.move_to(*apply_transform(stroke[0,0], stroke[1,0]))
-
-      for ink_x, ink_y in stroke[:2, 1:].T:
-        ctx.line_to(*apply_transform(ink_x, ink_y))
-      ctx.stroke()
     pil_image = cairo_to_pil(surface)
+    if resize_dims:
+        pil_image = pil_image.resize(resize_dims, PIL.Image.LANCZOS)
+    return pil_image
 
-  # Resize the image if resize dimensions are provided
-  if resize_dims is not None:
-      pil_image = pil_image.resize(resize_dims, PIL.Image.LANCZOS)
-    
-  return pil_image
-
+# Continued processing and main function
 
 def process_file(filename, input_dir, output_dir, size):
     """Process an individual InkML file to render and save its corresponding image and collect annotations."""
     input_path = os.path.join(input_dir, filename)
     output_path = os.path.join(output_dir, filename.replace('.inkml', '.png'))
 
-    # Read the ink from the InkML file
+    # Read and render the ink from the InkML file
     ink = read_inkml_file(input_path)
+    image = render_ink(ink, resize_dims=size)
 
-    # Render the ink to an image with specified size
-    image = render_ink(ink, resize_dims=(size[0], size[1]))
-
-    # Save the image
+    # Save the image to disk
     image.save(output_path)
-    # file_name,label,splitTagOriginal,inkCreationMethod,sampleId,normalizedLabel
+
+    # Collect relevant annotations for metadata
     return {
-       'file_name': filename.replace('.inkml', '.png'),
-       'label': ink.annotations['normalizedLabel'],
-      #  'normalized_label': ink.annotations['normalizedLabel']
+        'file_name': filename.replace('.inkml', '.png'),
+        'label': ink.annotations.get('label')
     }
-    # return {'file_name': filename.replace('.inkml', '.png'), **ink.annotations}
+
+def batch_process(files, input_dir, output_dir, size):
+    """Processes files in batches using parallel processing."""
+    annotations = []
+    with ProcessPoolExecutor(max_workers=16) as executor:
+        # Create a future for each file
+        futures = {executor.submit(process_file, file, input_dir, output_dir, size): file for file in files}
+
+        # Progress bar and error handling
+        for future in tqdm(as_completed(futures), total=len(files)):
+            try:
+                result = future.result()
+                annotations.append(result)
+            except Exception as e:
+                print(f"Error processing {futures[future]}: {str(e)}")
+
+    return annotations
 
 def main():
     parser = argparse.ArgumentParser(description="Process InkML files and generate images and annotations.")
@@ -165,20 +123,14 @@ def main():
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
 
-    # Prepare to collect annotations
-    annotations = []
+    # List all InkML files in the input directory
     files = [f for f in os.listdir(args.input) if f.endswith('.inkml')]
 
-    # Process each file in the input directory using parallel processing
-    with ProcessPoolExecutor() as executor:
-        results = list(tqdm(executor.map(process_file, files, [args.input]*len(files), [args.output]*len(files), [args.size]*len(files)), total=len(files)))
-
-    # Extend the annotations list with the results from each process
-    annotations.extend(results)
+    # Process files in parallel and collect annotations
+    annotations = batch_process(files, args.input, args.output, args.size)
 
     # Save annotations to a CSV file
-    df = pd.DataFrame(annotations)
-    df.to_csv(os.path.join(args.output, 'metadata.csv'), index=False)
+    pd.DataFrame(annotations).to_csv(os.path.join(args.output, 'metadata.csv'), index=False)
 
 if __name__ == '__main__':
     main()
