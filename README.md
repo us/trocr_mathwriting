@@ -60,6 +60,27 @@ The workflow for using this project is as follows:
    Note: Ensure that you have downloaded the MathWriting dataset, renamed it as `mw`, and have created the `mw_images` dataset according to the preparation step.
 
 
+3. **Predict**
+
+```
+python predict.py --help
+usage: predict.py [-h] --input_dir INPUT_DIR --output_file OUTPUT_FILE
+                  --checkpoint_path CHECKPOINT_PATH
+
+Process images and output results to a CSV file.
+
+options:
+  -h, --help            show this help message and exit
+  --input_dir INPUT_DIR
+                        Directory containing images to process
+  --output_file OUTPUT_FILE
+                        Output CSV file to write results
+  --checkpoint_path CHECKPOINT_PATH
+                        Path to the model checkpoint
+
+```
+
+
 ## Contributing
 
 Contributions to **trocr_mathwriting** are welcome. Please ensure to follow the existing coding standards and include tests with your code if applicable.

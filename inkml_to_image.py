@@ -10,15 +10,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-
-
 @dataclasses.dataclass
 class Ink:
     strokes: list[np.ndarray]
     annotations: dict[str, str]
 
 def read_inkml_file(file_path: str) -> Ink:
-    """ Reads InkML file from path directly to save memory and processing time. """
+    """Reads InkML file from path directly to save memory and processing time."""
     tree = parse(file_path)
     root = tree.getroot()
 
@@ -35,14 +33,14 @@ def read_inkml_file(file_path: str) -> Ink:
     return Ink(strokes=strokes, annotations=annotations)
 
 def cairo_to_pil(surface: cairo.ImageSurface) -> PIL.Image.Image:
-    """ Converts a Cairo surface into a PIL image. """
+    """Converts a Cairo surface into a PIL image."""
     size = (surface.get_width(), surface.get_height())
     stride = surface.get_stride()
     with surface.get_data() as memory:
         return PIL.Image.frombuffer('RGB', size, memory.tobytes(), 'raw', 'BGRX', stride)
 
 def render_ink(ink: Ink, margin: int = 10, stroke_width: float = 1.5, stroke_color: tuple[float, float, float] = (0, 0, 0), background_color: tuple[float, float, float] = (1, 1, 1), resize_dims: tuple[int, int] = None) -> PIL.Image.Image:
-    """ Renders an ink as a PIL image using Cairo. """
+    """Renders an ink as a PIL image using Cairo."""
     xmin, ymin = np.min([np.min(stroke[:2], axis=1) for stroke in ink.strokes], axis=0)
     xmax, ymax = np.max([np.max(stroke[:2], axis=1) for stroke in ink.strokes], axis=0)
     width, height = int(xmax - xmin + 2 * margin), int(ymax - ymin + 2 * margin)
@@ -72,18 +70,15 @@ def render_ink(ink: Ink, margin: int = 10, stroke_width: float = 1.5, stroke_col
 
     pil_image = cairo_to_pil(surface)
     if resize_dims:
-        pil_image = pil_image.resize(resize_dims, PIL.Image.LANCZOS)
+        pil_image = pil_image.resize(resize_dims, PIL.Image.Resampling.LANCZOS)
     return pil_image
 
-# Continued processing and main function
-
-def process_file(filename, input_dir, output_dir, size):
+def process_file(file_path, output_dir, size):
     """Process an individual InkML file to render and save its corresponding image and collect annotations."""
-    input_path = os.path.join(input_dir, filename)
-    output_path = os.path.join(output_dir, filename.replace('.inkml', '.png'))
+    output_path = os.path.join(output_dir, os.path.basename(file_path).replace('.inkml', '.png'))
 
     # Read and render the ink from the InkML file
-    ink = read_inkml_file(input_path)
+    ink = read_inkml_file(file_path)
     image = render_ink(ink, resize_dims=size)
 
     # Save the image to disk
@@ -91,19 +86,24 @@ def process_file(filename, input_dir, output_dir, size):
 
     # Collect relevant annotations for metadata
     return {
-        'file_name': filename.replace('.inkml', '.png'),
-        'label': ink.annotations.get('label')
+        'file_name': os.path.basename(output_path),
+        'label': ink.annotations.get('normalizedLabel', ink.annotations.get('label', ""))
     }
 
-def batch_process(files, input_dir, output_dir, size):
+def list_files(directory):
+    """Efficiently list InkML files in a directory using os.scandir."""
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.endswith('.inkml'):
+                yield entry.path
+
+def batch_process(input_dir, output_dir, size, num_workers):
     """Processes files in batches using parallel processing."""
     annotations = []
-    with ProcessPoolExecutor(max_workers=16) as executor:
-        # Create a future for each file
-        futures = {executor.submit(process_file, file, input_dir, output_dir, size): file for file in files}
-
-        # Progress bar and error handling
-        for future in tqdm(as_completed(futures), total=len(files)):
+    files = list_files(input_dir)
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(process_file, file, output_dir, size): file for file in files}
+        for future in tqdm(as_completed(futures), total=len(futures)):
             try:
                 result = future.result()
                 annotations.append(result)
@@ -123,11 +123,8 @@ def main():
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
 
-    # List all InkML files in the input directory
-    files = [f for f in os.listdir(args.input) if f.endswith('.inkml')]
-
     # Process files in parallel and collect annotations
-    annotations = batch_process(files, args.input, args.output, args.size)
+    annotations = batch_process(args.input, args.output, args.size, num_workers=os.cpu_count())  # Adjust num_workers as needed
 
     # Save annotations to a CSV file
     pd.DataFrame(annotations).to_csv(os.path.join(args.output, 'metadata.csv'), index=False)

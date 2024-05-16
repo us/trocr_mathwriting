@@ -8,3 +8,4 @@ jiwer
 torch
 pillow
 gradio==3.50
+pandas
